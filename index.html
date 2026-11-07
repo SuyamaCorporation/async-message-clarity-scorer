@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>非同期メッセージ明瞭度スコアラー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+<div class="max-w-3xl mx-auto px-4 py-8">
+  <h1 class="text-3xl font-bold text-center mb-2 text-emerald-400">非同期メッセージ明瞭度スコアラー</h1>
+  <p class="text-center text-gray-400 mb-8 text-sm">Slackメッセージの曖昧表現を検出してスコア化し改善提案を表示</p>
+
+  <div class="bg-gray-800 rounded-xl p-6 mb-6">
+    <label class="block text-sm text-gray-400 mb-2" for="messageInput">メッセージを入力</label>
+    <textarea id="messageInput" rows="6" placeholder="例: 適当に確認しておいてください。これについて、なるべく早めに対応お願いします。" class="w-full bg-gray-700 rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-y" aria-label="メッセージ入力"></textarea>
+    <div class="flex gap-2 mt-3 flex-wrap">
+      <button class="sampleBtn text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2 py-1 rounded" data-sample="0" aria-label="悪い例を入力">悪い例を試す</button>
+      <button class="sampleBtn text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2 py-1 rounded" data-sample="1" aria-label="良い例を入力">良い例を試す</button>
+      <button id="clearBtn" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded" aria-label="クリア">クリア</button>
+    </div>
+  </div>
+
+  <div id="scoreSection" class="hidden">
+    <div class="bg-gray-800 rounded-xl p-6 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-emerald-300">明瞭度スコア</h2>
+        <div id="scoreLabel" class="text-sm font-bold px-3 py-1 rounded-full"></div>
+      </div>
+      <div class="relative h-8 bg-gray-700 rounded-full overflow-hidden mb-2">
+        <div id="scoreBar" class="h-full rounded-full transition-all duration-500" style="width:0%"></div>
+        <div class="absolute inset-0 flex items-center justify-center font-bold text-white text-lg" id="scoreText">0</div>
+      </div>
+      <div class="flex justify-between text-xs text-gray-500">
+        <span>0 (要改善)</span><span>50</span><span>100 (明瞭)</span>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+      <div class="bg-gray-800 rounded-xl p-4">
+        <h2 class="text-sm font-semibold text-red-300 mb-3">検出された問題</h2>
+        <div id="issuesList" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="bg-gray-800 rounded-xl p-4">
+        <h2 class="text-sm font-semibold text-green-300 mb-3">改善提案</h2>
+        <div id="suggestionsList" class="space-y-2 text-sm"></div>
+      </div>
+    </div>
+
+    <div class="bg-gray-800 rounded-xl p-4 mb-6">
+      <h2 class="text-sm font-semibold text-yellow-300 mb-3">ハイライト表示（問題箇所）</h2>
+      <div id="highlightedText" class="text-sm leading-relaxed bg-gray-700 rounded-lg p-3 whitespace-pre-wrap"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const SAMPLES = [
+  "適当に確認しておいてください。これについて、なるべく早めに対応お願いします。それと、あの件もよろしく。できれば今週中にやってもらえると助かります。",
+  "田中さん、2024年1月15日（月）17:00までに、先週共有した要件定義書（Confluence: /project/spec-v2）のセクション3を確認し、変更点があればコメントをお願いします。不明点は本スレッドに返信してください。"
+];
+
+const VAGUE_WORDS = ['適当に','なるべく','できれば','そのうち','早めに','後で','いい感じに','うまく','ちょっと','少し','なんとなく','適宜','随時','適切に','よしなに'];
+const PRONOUN_WORDS = ['これ','それ','あれ','ここ','そこ','あそこ','この件','その件','あの件','こちら','そちら','あちら'];
+const PASSIVE_PATTERNS = ['〜ください', 'てもらえると','と助かります','よろしく','お願いします'];
+const DEADLINE_PATTERNS = ['今週中','来週中','なるべく早く','早めに','できるだけ早く','急ぎで','至急','そのうち'];
+
+function analyzeMessage(text) {
+  const issues = [];
+  const suggestions = [];
+  let deductions = 0;
+  const highlights = {};
+
+  VAGUE_WORDS.forEach(w => {
+    const idx = text.indexOf(w);
+    if (idx !== -1) {
+      issues.push({ type: '曖昧語', text: w, color: 'red' });
+      suggestions.push(`「${w}」→ 具体的な基準・数値・条件に置き換えてください`);
+      deductions += 10;
+      highlights[idx] = { word: w, color: 'bg-red-500/40' };
+    }
+  });
+
+  PRONOUN_WORDS.forEach(w => {
+    const idx = text.indexOf(w);
+    if (idx !== -1) {
+      issues.push({ type: '指示語不明', text: w, color: 'orange' });
+      suggestions.push(`「${w}」→ 指示対象を具体的に明示してください（例: 「昨日共有したXXX」）`);
+      deductions += 8;
+    }
+  });
+
+  let hasDeadlineVague = false;
+  DEADLINE_PATTERNS.forEach(w => {
+    if (text.includes(w) && !text.match(/\d{1,2}月\d{1,2}日|\d{4}[-\/]\d{1,2}[-\/]\d{1,2}|月曜|火曜|水曜|木曜|金曜|土曜|日曜/)) {
+      if (!hasDeadlineVague) {
+        issues.push({ type: '期限不明', text: w, color: 'yellow' });
+        suggestions.push(`期限「${w}」→ 具体的な日時（YYYY-MM-DD HH:MM）を記載してください`);
+        deductions += 15;
+        hasDeadlineVague = true;
+      }
+    }
+  });
+
+  const hasSubject = /[さんさま殿氏]|チーム|グループ/.test(text) || text.length < 30;
+  if (!hasSubject && text.length > 20) {
+    issues.push({ type: '宛先不明', text: '（受信者不明）', color: 'purple' });
+    suggestions.push('メッセージの冒頭に「@田中さん」等の宛先を明示してください');
+    deductions += 12;
+  }
+
+  if (text.length > 10 && !text.match(/\d{1,2}月\d{1,2}日|\d{4}[-\/]\d{1,2}[-\/]\d{1,2}|明日|今日|本日/)) {
+    if (!hasDeadlineVague && text.includes('お願い')) {
+      issues.push({ type: '期限なし', text: '（期限記載なし）', color: 'yellow' });
+      suggestions.push('依頼する場合は必ず期限（YYYY-MM-DD HH:MM）を記載してください');
+      deductions += 10;
+    }
+  }
+
+  const score = Math.max(0, Math.min(100, 100 - deductions));
+  return { score, issues, suggestions };
+}
+
+function highlightText(text, issues) {
+  const container = document.getElementById('highlightedText');
+  container.innerHTML = '';
+
+  const allWords = [];
+  issues.forEach(issue => {
+    if (issue.type === '曖昧語') allWords.push({ word: issue.text, cls: 'bg-red-500/50 text-red-100 rounded px-0.5' });
+    if (issue.type === '指示語不明') allWords.push({ word: issue.text, cls: 'bg-orange-500/50 text-orange-100 rounded px-0.5' });
+    if (issue.type === '期限不明') allWords.push({ word: issue.text, cls: 'bg-yellow-500/50 text-yellow-100 rounded px-0.5' });
+  });
+
+  let html = text;
+  allWords.forEach(({ word, cls }) => {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    html = html.replace(new RegExp(escaped, 'g'), `<mark class="${cls}">${word}</mark>`);
+  });
+
+  const temp = document.createElement('div');
+  const parts = html.split(/(<mark[^>]*>.*?<\/mark>)/);
+  parts.forEach(part => {
+    if (part.startsWith('<mark')) {
+      const m = document.createElement('mark');
+      const cls = part.match(/class="([^"]+)"/)?.[1] || '';
+      m.className = cls;
+      const inner = part.replace(/<mark[^>]*>/, '').replace(/<\/mark>/, '');
+      m.textContent = inner;
+      container.appendChild(m);
+    } else {
+      container.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+function renderScore(score) {
+  const bar = document.getElementById('scoreBar');
+  const text = document.getElementById('scoreText');
+  const label = document.getElementById('scoreLabel');
+
+  text.textContent = score;
+
+  if (score >= 70) {
+    bar.className = 'h-full rounded-full transition-all duration-500 bg-green-500';
+    label.className = 'text-sm font-bold px-3 py-1 rounded-full bg-green-800 text-green-200';
+    label.textContent = '明瞭';
+  } else if (score >= 40) {
+    bar.className = 'h-full rounded-full transition-all duration-500 bg-yellow-500';
+    label.className = 'text-sm font-bold px-3 py-1 rounded-full bg-yellow-800 text-yellow-200';
+    label.textContent = '要改善';
+  } else {
+    bar.className = 'h-full rounded-full transition-all duration-500 bg-red-500';
+    label.className = 'text-sm font-bold px-3 py-1 rounded-full bg-red-800 text-red-200';
+    label.textContent = '不明瞭';
+  }
+
+  setTimeout(() => { bar.style.width = score + '%'; }, 50);
+}
+
+function renderIssues(issues) {
+  const container = document.getElementById('issuesList');
+  container.innerHTML = '';
+  if (issues.length === 0) {
+    container.innerHTML = '<div class="text-green-400 text-xs">問題なし ✓</div>';
+    return;
+  }
+  const colorMap = { red: 'bg-red-900/40 text-red-300', orange: 'bg-orange-900/40 text-orange-300', yellow: 'bg-yellow-900/40 text-yellow-300', purple: 'bg-purple-900/40 text-purple-300' };
+  issues.forEach(issue => {
+    const div = document.createElement('div');
+    div.className = `px-2 py-1.5 rounded text-xs ${colorMap[issue.color] || 'bg-gray-700 text-gray-300'}`;
+    div.textContent = `[${issue.type}] ${issue.text}`;
+    container.appendChild(div);
+  });
+}
+
+function renderSuggestions(suggestions) {
+  const container = document.getElementById('suggestionsList');
+  container.innerHTML = '';
+  if (suggestions.length === 0) {
+    container.innerHTML = '<div class="text-green-400 text-xs">改善提案なし ✓</div>';
+    return;
+  }
+  suggestions.forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'text-xs text-gray-300 bg-green-900/20 border border-green-800/40 rounded px-2 py-1.5';
+    div.textContent = s;
+    container.appendChild(div);
+  });
+}
+
+function run() {
+  const text = document.getElementById('messageInput').value.trim();
+  if (!text) {
+    document.getElementById('scoreSection').classList.add('hidden');
+    return;
+  }
+
+  const { score, issues, suggestions } = analyzeMessage(text);
+  document.getElementById('scoreSection').classList.remove('hidden');
+  renderScore(score);
+  renderIssues(issues);
+  renderSuggestions(suggestions);
+  highlightText(text, issues);
+}
+
+document.getElementById('messageInput').addEventListener('input', run);
+document.querySelectorAll('.sampleBtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('messageInput').value = SAMPLES[parseInt(btn.getAttribute('data-sample'))];
+    run();
+  });
+});
+document.getElementById('clearBtn').addEventListener('click', () => {
+  document.getElementById('messageInput').value = '';
+  document.getElementById('scoreSection').classList.add('hidden');
+});
+</script>
+</body>
+</html>
